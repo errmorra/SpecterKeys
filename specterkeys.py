@@ -40,7 +40,7 @@ CONFIG = {
     "alarm_prefix":      "SpecterKeys-Triggered",
     "tag_key":           "SpecterKeys",
     "tag_value":         "HoneyToken-DoNotUse",
-    "alert_email":       os.getenv("SPECTORKEYS_ALERT_EMAIL", "security-team@company.com"),
+    "alert_email":       os.getenv("SPECTERKEYS_ALERT_EMAIL", "security-team@company.com"),
     "deploy_targets": [
         {"filename": "prod_access_keys.csv",        "type": "csv"},
         {"filename": "aws_credentials_backup.txt",  "type": "ini"},
@@ -138,7 +138,7 @@ def create_cloudwatch_alarm(cw_client, credentials: dict, topic_arn: str) -> str
     cw_client.put_metric_alarm(
         AlarmName=        alarm_name,
         AlarmDescription= (
-            f"SPECTORKEYS TRIGGERED — Honey token used by {username}. "
+            f"SPECTERKEYS TRIGGERED — Honey token used by {username}. "
             f"Key: {credentials['access_key_id']}. "
             "This credential has zero legitimate use. Treat as confirmed insider threat."
         ),

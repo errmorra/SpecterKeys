@@ -129,7 +129,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: SpecterKeysAlerts
-      DisplayName: "SPECTORKEYS ALERT — Honey Token Triggered"
+      DisplayName: "SPECTERKEYS ALERT — Honey Token Triggered"
       Subscription:
         - Protocol: email
           Endpoint: !Ref AlertEmail
@@ -281,7 +281,7 @@ Resources:
                                       log.info(f"Disabled key {key_id}")
                       except Exception as e:
                           log.error(f"Key disable error: {e}")
-                  log.info(f"SPECTORKEYS INCIDENT: {json.dumps(incident)}")
+                  log.info(f"SPECTERKEYS INCIDENT: {json.dumps(incident)}")
               return {"statusCode": 200}
 
       Tags:

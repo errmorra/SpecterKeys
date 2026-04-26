@@ -43,7 +43,7 @@ Since these keys have no legitimate use, **every single alert is a true positive
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                         SPECTORKEYS PIPELINE                         │
+│                         SPECTERKEYS PIPELINE                         │
 │                                                                      │
 │  ┌─────────────────────┐   generates   ┌──────────────────────────┐ │
 │  │  specterkeys.py      │ ──────────►  │  IAM Honey User          │ │
@@ -146,7 +146,7 @@ pip install -r requirements.txt
 ### 3. Set Your Alert Email
 
 ```bash
-export SPECTORKEYS_ALERT_EMAIL="security@yourcompany.com"
+export SPECTERKEYS_ALERT_EMAIL="security@yourcompany.com"
 ```
 
 ### 4. Deploy a Honey Key
