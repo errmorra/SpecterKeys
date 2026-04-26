@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  SpecterKeys — Honey Token Deception System (Infrastructure Stack)
+  Deploys the full detection pipeline: CloudTrail → CloudWatch Logs →
+  Metric Filters → Alarms → SNS → Lambda auto-responder.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Security team email for honey key alerts
+    Default: security-team@company.com
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    Description: CloudWatch Logs retention period in days
+
+Resources:
+
+  # ── S3 — CloudTrail Log Bucket ───────────────────────────────────────────
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "specterkeys-cloudtrail-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldLogs
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      Tags:
+        - Key: SpecterKeys
+          Value: Infrastructure
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  # ── CloudWatch Log Group ─────────────────────────────────────────────────
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /specterkeys/cloudtrail
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: SpecterKeys
+          Value: Infrastructure
+
+  # ── CloudTrail IAM Role ──────────────────────────────────────────────────
+  CloudTrailRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SpecterKeys-CloudTrailRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailLogsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CloudTrailLogGroup.Arn
+
+  # ── CloudTrail ───────────────────────────────────────────────────────────
+  SpecterKeysTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: SpecterKeysTrail
+      IsLogging: true
+      S3BucketName: !Ref CloudTrailBucket
+      IncludeGlobalServiceEvents: true     # Captures global IAM API calls
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailRole.Arn
+      Tags:
+        - Key: SpecterKeys
+          Value: Infrastructure
+
+  # ── SNS Alert Topic ──────────────────────────────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: SpecterKeysAlerts
+      DisplayName: "SPECTORKEYS ALERT — Honey Token Triggered"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+        - Protocol: lambda
+          Endpoint: !GetAtt AutoResponderLambda.Arn
+      Tags:
+        - Key: SpecterKeys
+          Value: Infrastructure
+
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+
+  # ── Metric Filter — Catches any honey user API call ──────────────────────
+  HoneyKeyMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref CloudTrailLogGroup
+      FilterName: SpecterKeys-AnyHoneyUserCall
+      FilterPattern: '{ $.userIdentity.userName = "svc-legacy-backup-*" }'
+      MetricTransformations:
+        - MetricName: HoneyKeyAPICall
+          MetricNamespace: SpecterKeys/DeceptionSystem
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  # ── CloudWatch Alarm ─────────────────────────────────────────────────────
+  HoneyKeyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: SpecterKeys-HoneyTokenTriggered
+      AlarmDescription: >
+        CRITICAL: A SpecterKeys honey token has been used.
+        This credential has ZERO legitimate use — any invocation is a
+        confirmed insider threat or external breach. Initiate IR playbook.
+      MetricName: HoneyKeyAPICall
+      Namespace: SpecterKeys/DeceptionSystem
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      Tags:
+        - Key: SpecterKeys
+          Value: Infrastructure
+
+  # ── Lambda Auto-Responder ────────────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SpecterKeys-LambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SpecterKeysResponderPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:UpdateAccessKey
+                  - iam:ListAccessKeys
+                  - iam:ListUsers
+                  - iam:TagUser
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - sns:Publish
+                Resource: "*"
+
+  AutoResponderLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SpecterKeys-AutoResponder
+      Description: >
+        On honey key trigger: disables the access key, tags the IAM user
+        with the incident timestamp, and logs a structured IR event.
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          ENVIRONMENT: !Ref EnvironmentName
+      Code:
+        ZipFile: |
+          """SpecterKeys Auto-Responder Lambda — triggered by SNS alarm."""
+          import json, boto3, os, logging
+          from datetime import datetime, timezone
+
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+          iam = boto3.client("iam")
+
+          def lambda_handler(event, context):
+              log.info(f"SpecterKeys event: {json.dumps(event)}")
+              for record in event.get("Records", []):
+                  message = json.loads(record["Sns"]["Message"])
+                  alarm   = message.get("AlarmName", "")
+                  parts   = alarm.split("-")
+                  key_id  = parts[-1] if parts else None
+                  ts      = datetime.now(timezone.utc).isoformat()
+                  incident = {
+                      "timestamp": ts,
+                      "alarm":     alarm,
+                      "key_id":    key_id,
+                      "state":     message.get("NewStateValue"),
+                      "reason":    message.get("NewStateReason"),
+                      "severity":  "CRITICAL",
+                  }
+                  if key_id and key_id.startswith("AKIA"):
+                      try:
+                          for user in iam.list_users()["Users"]:
+                              for k in iam.list_access_keys(UserName=user["UserName"])["AccessKeyMetadata"]:
+                                  if k["AccessKeyId"] == key_id:
+                                      iam.update_access_key(
+                                          UserName=user["UserName"],
+                                          AccessKeyId=key_id,
+                                          Status="Inactive",
+                                      )
+                                      iam.tag_user(
+                                          UserName=user["UserName"],
+                                          Tags=[{"Key": "TriggeredAt", "Value": ts}],
+                                      )
+                                      incident["username"] = user["UserName"]
+                                      log.info(f"Disabled key {key_id}")
+                      except Exception as e:
+                          log.error(f"Key disable error: {e}")
+                  log.info(f"SPECTORKEYS INCIDENT: {json.dumps(incident)}")
+              return {"statusCode": 200}
+
+      Tags:
+        - Key: SpecterKeys
+          Value: Infrastructure
+
+  LambdaSNSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AutoResponderLambda
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref AlertTopic
+
+  # ── Secrets Manager — Key Registry ──────────────────────────────────────
+  KeyRegistry:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: specterkeys/registry
+      Description: Master registry of all deployed SpecterKeys honey tokens
+      SecretString: '{"honey_keys": [], "total_deployed": 0, "total_triggered": 0}'
+      Tags:
+        - Key: SpecterKeys
+          Value: Infrastructure
+
+  # ── CloudWatch Dashboard ─────────────────────────────────────────────────
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: SpecterKeys-DeceptionSystem
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "alarm",
+              "properties": {
+                "title": "Honey Key Alarm Status",
+                "alarms": ["${HoneyKeyAlarm}"]
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Honey Key API Calls (24h)",
+                "metrics": [["SpecterKeys/DeceptionSystem","HoneyKeyAPICall"]],
+                "period": 3600,
+                "stat": "Sum",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  AlertTopicArn:
+    Description: SNS topic ARN for honey key alerts
+    Value: !Ref AlertTopic
+    Export:
+      Name: SpecterKeys-AlertTopicArn
+
+  CloudTrailLogGroupName:
+    Description: CloudWatch log group receiving CloudTrail events
+    Value: !Ref CloudTrailLogGroup
+    Export:
+      Name: SpecterKeys-LogGroupName
+
+  AutoResponderArn:
+    Description: Auto-responder Lambda function ARN
+    Value: !GetAtt AutoResponderLambda.Arn
+
+  DashboardUrl:
+    Description: CloudWatch dashboard URL
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=SpecterKeys-DeceptionSystem"

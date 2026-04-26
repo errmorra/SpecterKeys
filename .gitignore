@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Honey drop — NEVER commit planted credential files
+honey_drop/
+
+# AWS credentials — NEVER commit
+.env
+.env.*
+*.tfvars
+*_credentials*
+*access_key*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,72 @@
+name: Honey Key Triggered — Incident Report
+description: File an incident when a SpecterKeys honey token has been used
+title: "[INCIDENT] Honey token triggered — "
+labels: ["incident", "priority:critical"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## SpecterKeys Incident Report
+        Complete all fields. This report is the start of your IR paper trail.
+
+  - type: input
+    id: key_id
+    attributes:
+      label: Access Key ID
+      description: The AKIA... key ID that fired the alarm
+      placeholder: AKIA...
+    validations:
+      required: true
+
+  - type: input
+    id: iam_user
+    attributes:
+      label: IAM Username
+      placeholder: svc-legacy-backup-xxxxxxxx
+    validations:
+      required: true
+
+  - type: input
+    id: source_ip
+    attributes:
+      label: Source IP Address
+      placeholder: 203.0.113.x
+    validations:
+      required: true
+
+  - type: input
+    id: api_action
+    attributes:
+      label: API Action Called
+      placeholder: sts:GetCallerIdentity
+    validations:
+      required: true
+
+  - type: input
+    id: drop_location
+    attributes:
+      label: Honey File Location
+      description: Where was the credential file planted?
+      placeholder: s3://shared-assets/legacy-creds/prod_access_keys.csv
+    validations:
+      required: true
+
+  - type: textarea
+    id: timeline
+    attributes:
+      label: Initial Timeline
+      description: What do you know so far?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Suspected Threat Actor
+      options:
+        - Malicious insider
+        - Curious insider (accidental)
+        - External attacker (compromised internal access)
+        - Unknown
+    validations:
+      required: true
