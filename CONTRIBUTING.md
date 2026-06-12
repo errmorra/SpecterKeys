@@ -5,11 +5,10 @@ SpecterKeys is a restricted internal security tool. Contributions are limited to
 ## Development Setup
 
 ```bash
-git clone https://github.com/your-org/specterkeys.git
+git clone https://github.com/specterkeys/specterkeys.git
 cd specterkeys
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pip install pytest flake8 bandit
+pip install -r requirements-dev.txt
 ```
 
 ## Running Tests
@@ -21,7 +20,7 @@ pytest tests/ -v --cov=src
 ## Running the Linter
 
 ```bash
-flake8 src/ tests/ --max-line-length=110
+flake8 src/ tests/
 ```
 
 ## Running the Security Scanner

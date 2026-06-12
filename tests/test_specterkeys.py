@@ -4,12 +4,13 @@ SpecterKeys — Unit Tests
 Run with: pytest tests/ -v
 """
 
+import os
+import sys
 import json
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
-import sys
 sys.path.insert(0, "src")
 
 from specterkeys import (
@@ -17,14 +18,15 @@ from specterkeys import (
     CONFIG,
     create_honey_iam_user,
     setup_sns_topic,
-    create_cloudwatch_alarm,
+    setup_cloudtrail_metric_filter,
     plant_credential_files,
     render_csv,
     render_ini,
     render_env,
     render_tfvars,
     check_alarm_status,
-    list_honey_keys,
+    revoke_honey_key,
+    deploy,
 )
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
@@ -36,6 +38,7 @@ SAMPLE_CREDS = {
     "session_id":        "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "created_at":        "2025-06-18T09:42:00+00:00",
 }
+
 
 # ── IAM Tests ──────────────────────────────────────────────────────────────────
 
@@ -146,7 +149,6 @@ class TestPlantCredentialFiles:
     def test_files_exist_on_disk(self, tmp_path):
         planted = plant_credential_files(SAMPLE_CREDS, output_dir=str(tmp_path))
         for path in planted:
-            import os
             assert os.path.exists(path), f"Missing: {path}"
 
     def test_csv_file_is_named_correctly(self, tmp_path):
@@ -163,20 +165,47 @@ class TestPlantCredentialFiles:
 
 # ── SNS Tests ──────────────────────────────────────────────────────────────────
 
+def _sns_mock_no_subscriptions():
+    sns = MagicMock()
+    sns.create_topic.return_value = {"TopicArn": "arn:aws:sns:us-east-1:123:SpecterKeysAlerts"}
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Subscriptions": []}]
+    sns.get_paginator.return_value = paginator
+    return sns
+
+
 class TestSetupSNSTopic:
     def test_creates_topic_with_correct_name(self):
-        sns = MagicMock()
-        sns.create_topic.return_value = {"TopicArn": "arn:aws:sns:us-east-1:123:SpecterKeysAlerts"}
-        arn = setup_sns_topic(sns)
+        sns = _sns_mock_no_subscriptions()
+        arn = setup_sns_topic(sns, alert_email="security@real.example.com")
         sns.create_topic.assert_called_once_with(Name=CONFIG["sns_topic_name"])
         assert arn == "arn:aws:sns:us-east-1:123:SpecterKeysAlerts"
 
     def test_subscribes_alert_email(self):
-        sns = MagicMock()
-        sns.create_topic.return_value = {"TopicArn": "arn:aws:sns:us-east-1:123:SpecterKeysAlerts"}
-        setup_sns_topic(sns)
+        sns = _sns_mock_no_subscriptions()
+        setup_sns_topic(sns, alert_email="security@real.example.com")
         subscribe_call = sns.subscribe.call_args
         assert subscribe_call.kwargs["Protocol"] == "email"
+        assert subscribe_call.kwargs["Endpoint"] == "security@real.example.com"
+
+    def test_skips_subscription_for_placeholder_email(self):
+        from specterkeys import PLACEHOLDER_EMAIL
+        sns = _sns_mock_no_subscriptions()
+        setup_sns_topic(sns, alert_email=PLACEHOLDER_EMAIL)
+        sns.subscribe.assert_not_called()
+
+    def test_does_not_resubscribe_existing_endpoint(self):
+        sns = MagicMock()
+        sns.create_topic.return_value = {"TopicArn": "arn:aws:sns:us-east-1:123:SpecterKeysAlerts"}
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{
+            "Subscriptions": [
+                {"Protocol": "email", "Endpoint": "security@real.example.com"}
+            ]
+        }]
+        sns.get_paginator.return_value = paginator
+        setup_sns_topic(sns, alert_email="security@real.example.com")
+        sns.subscribe.assert_not_called()
 
 
 # ── Alarm Status Tests ─────────────────────────────────────────────────────────
@@ -218,3 +247,101 @@ class TestConfig:
         assert "ghost" not in prefix.lower()     # Should not self-identify as a trap
         assert "honey" not in prefix.lower()
         assert "fake"  not in prefix.lower()
+
+
+# ── Renderer Account / Region Tests ─────────────────────────────────────────────
+
+class TestRendererAccountRegion:
+    def test_csv_uses_supplied_account_and_region(self):
+        output = render_csv(SAMPLE_CREDS, account_id="999988887777", region="eu-west-1")
+        assert "999988887777" in output
+        assert "eu-west-1" in output
+
+    def test_ini_uses_supplied_region(self):
+        output = render_ini(SAMPLE_CREDS, region="ap-southeast-2")
+        assert "ap-southeast-2" in output
+
+    def test_env_uses_supplied_region(self):
+        output = render_env(SAMPLE_CREDS, region="us-west-2")
+        assert "AWS_DEFAULT_REGION=us-west-2" in output
+
+
+# ── Metric Filter Tests ─────────────────────────────────────────────────────────
+
+class TestMetricFilter:
+    def test_filter_matches_username_and_key_id(self):
+        logs = MagicMock()
+        name = setup_cloudtrail_metric_filter(logs, "/specterkeys/cloudtrail", SAMPLE_CREDS)
+        kwargs = logs.put_metric_filter.call_args.kwargs
+        pattern = kwargs["filterPattern"]
+        assert SAMPLE_CREDS["username"] in pattern
+        assert SAMPLE_CREDS["access_key_id"] in pattern
+        assert name == f"SpecterKeys-Filter-{SAMPLE_CREDS['username']}"
+
+    def test_filter_failure_propagates(self):
+        from botocore.exceptions import ClientError
+        logs = MagicMock()
+        logs.put_metric_filter.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": ""}}, "PutMetricFilter"
+        )
+        with pytest.raises(ClientError):
+            setup_cloudtrail_metric_filter(logs, "/missing", SAMPLE_CREDS)
+
+
+# ── Revoke Tests ────────────────────────────────────────────────────────────────
+
+class TestRevokeHoneyKey:
+    def test_deletes_metric_filter_when_present(self):
+        iam, sm, cw, logs = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        key_data = SAMPLE_CREDS | {
+            "alarm_name":  "SpecterKeys-Triggered-AKIATESTKEY000001",
+            "filter_name": "SpecterKeys-Filter-svc-legacy-backup-a1b2c3d4",
+            "log_group":   "/specterkeys/cloudtrail",
+        }
+        revoke_honey_key(iam, sm, cw, key_data, logs_client=logs)
+        logs.delete_metric_filter.assert_called_once_with(
+            logGroupName="/specterkeys/cloudtrail",
+            filterName="SpecterKeys-Filter-svc-legacy-backup-a1b2c3d4",
+        )
+
+    def test_deletes_iam_user_alarm_and_secret(self):
+        iam, sm, cw, logs = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        revoke_honey_key(iam, sm, cw, SAMPLE_CREDS, logs_client=logs)
+        iam.delete_user.assert_called_once()
+        cw.delete_alarms.assert_called_once()
+        sm.delete_secret.assert_called_once()
+
+
+# ── Deploy Rollback Tests ────────────────────────────────────────────────────────
+
+class TestDeployRollback:
+    def test_rolls_back_iam_user_on_failure(self):
+        import specterkeys
+
+        iam = MagicMock()
+        iam.create_access_key.return_value = {
+            "AccessKey": {"AccessKeyId": "AKIAROLLBACK", "SecretAccessKey": "secret"}
+        }
+        # Metric filter blows up after the user is created.
+        logs = MagicMock()
+        logs.put_metric_filter.side_effect = RuntimeError("boom")
+
+        sts = MagicMock()
+        sts.get_caller_identity.return_value = {"Account": "123456789012"}
+        sns = MagicMock()
+        sns.create_topic.return_value = {"TopicArn": "arn:aws:sns:us-east-1:123:SpecterKeysAlerts"}
+
+        clients = {
+            "iam": iam, "sns": sns, "cloudwatch": MagicMock(),
+            "logs": logs, "secretsmanager": MagicMock(), "sts": sts,
+        }
+        fake_session = MagicMock()
+        fake_session.region_name = "us-east-1"
+        fake_session.client.side_effect = lambda name: clients[name]
+
+        with patch.object(specterkeys, "build_session", return_value=fake_session):
+            with pytest.raises(RuntimeError):
+                deploy("/specterkeys/cloudtrail")
+
+        # The honey user must be torn down so no live, unmonitored key remains.
+        iam.delete_user.assert_called_once()

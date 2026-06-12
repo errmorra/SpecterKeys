@@ -133,8 +133,6 @@ Resources:
       Subscription:
         - Protocol: email
           Endpoint: !Ref AlertEmail
-        - Protocol: lambda
-          Endpoint: !GetAtt AutoResponderLambda.Arn
       Tags:
         - Key: SpecterKeys
           Value: Infrastructure
@@ -159,7 +157,9 @@ Resources:
     Properties:
       LogGroupName: !Ref CloudTrailLogGroup
       FilterName: SpecterKeys-AnyHoneyUserCall
-      FilterPattern: '{ $.userIdentity.userName = "svc-legacy-backup-*" }'
+      # Match both the direct IAM username and the assumed-role/session issuer
+      # name so events where userName is nested are still caught.
+      FilterPattern: '{ ($.userIdentity.userName = "svc-legacy-backup-*") || ($.userIdentity.sessionContext.sessionIssuer.userName = "svc-legacy-backup-*") }'
       MetricTransformations:
         - MetricName: HoneyKeyAPICall
           MetricNamespace: SpecterKeys/DeceptionSystem
@@ -220,6 +220,9 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                   - sns:Publish
+                  - secretsmanager:ListSecrets
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
                 Resource: "*"
 
   AutoResponderLambda:
@@ -237,50 +240,100 @@ Resources:
         Variables:
           ALERT_TOPIC_ARN: !Ref AlertTopic
           ENVIRONMENT: !Ref EnvironmentName
+          HONEY_USER_PREFIX: svc-legacy-backup
+          SECRET_PREFIX: specterkeys
       Code:
         ZipFile: |
-          """SpecterKeys Auto-Responder Lambda — triggered by SNS alarm."""
-          import json, boto3, os, logging
+          """SpecterKeys Auto-Responder Lambda — triggered by SNS alarm.
+
+          The stack-level alarm name does not embed an access key ID, so the
+          responder cannot rely on parsing it. Instead it enumerates IAM users
+          that match the honey-user prefix (paginated) and disables their
+          access keys — any honey-key usage is malicious by definition — then
+          marks the matching Secrets Manager registry entry as TRIGGERED.
+          """
+          import json, os, logging
+          import boto3
           from datetime import datetime, timezone
 
           log = logging.getLogger()
           log.setLevel(logging.INFO)
           iam = boto3.client("iam")
+          sm  = boto3.client("secretsmanager")
+
+          HONEY_USER_PREFIX = os.environ.get("HONEY_USER_PREFIX", "svc-legacy-backup")
+          SECRET_PREFIX     = os.environ.get("SECRET_PREFIX", "specterkeys")
+
+
+          def extract_key_id(alarm_name):
+              for token in alarm_name.split("-"):
+                  if token.startswith("AKIA"):
+                      return token
+              return None
+
+
+          def iter_honey_users():
+              paginator = iam.get_paginator("list_users")
+              for page in paginator.paginate():
+                  for user in page["Users"]:
+                      if user["UserName"].startswith(HONEY_USER_PREFIX):
+                          yield user["UserName"]
+
+
+          def disable_honey_keys(target_key_id, ts):
+              disabled = []
+              for username in iter_honey_users():
+                  for k in iam.list_access_keys(UserName=username)["AccessKeyMetadata"]:
+                      key_id = k["AccessKeyId"]
+                      if target_key_id and key_id != target_key_id:
+                          continue
+                      if k.get("Status") != "Active":
+                          continue
+                      try:
+                          iam.update_access_key(
+                              UserName=username, AccessKeyId=key_id, Status="Inactive"
+                          )
+                          iam.tag_user(
+                              UserName=username,
+                              Tags=[{"Key": "TriggeredAt", "Value": ts}],
+                          )
+                          disabled.append({"username": username, "key_id": key_id})
+                          log.info(f"Disabled key {key_id} (user {username})")
+                          mark_secret_triggered(key_id, ts)
+                      except Exception as e:
+                          log.error(f"Key disable error for {key_id}: {e}")
+              return disabled
+
+
+          def mark_secret_triggered(key_id, ts):
+              secret_id = f"{SECRET_PREFIX}/{key_id}"
+              try:
+                  current = sm.get_secret_value(SecretId=secret_id)
+                  data = json.loads(current["SecretString"])
+                  data["status"] = "TRIGGERED"
+                  data["triggered_at"] = ts
+                  sm.put_secret_value(SecretId=secret_id, SecretString=json.dumps(data))
+              except Exception as e:
+                  log.warning(f"Could not update registry for {key_id}: {e}")
+
 
           def lambda_handler(event, context):
               log.info(f"SpecterKeys event: {json.dumps(event)}")
               for record in event.get("Records", []):
                   message = json.loads(record["Sns"]["Message"])
                   alarm   = message.get("AlarmName", "")
-                  parts   = alarm.split("-")
-                  key_id  = parts[-1] if parts else None
                   ts      = datetime.now(timezone.utc).isoformat()
+                  target_key_id = extract_key_id(alarm)
+                  disabled = disable_honey_keys(target_key_id, ts)
                   incident = {
-                      "timestamp": ts,
-                      "alarm":     alarm,
-                      "key_id":    key_id,
-                      "state":     message.get("NewStateValue"),
-                      "reason":    message.get("NewStateReason"),
-                      "severity":  "CRITICAL",
+                      "timestamp":     ts,
+                      "alarm":         alarm,
+                      "target_key_id": target_key_id,
+                      "disabled_keys": disabled,
+                      "state":         message.get("NewStateValue"),
+                      "reason":        message.get("NewStateReason"),
+                      "severity":      "CRITICAL",
                   }
-                  if key_id and key_id.startswith("AKIA"):
-                      try:
-                          for user in iam.list_users()["Users"]:
-                              for k in iam.list_access_keys(UserName=user["UserName"])["AccessKeyMetadata"]:
-                                  if k["AccessKeyId"] == key_id:
-                                      iam.update_access_key(
-                                          UserName=user["UserName"],
-                                          AccessKeyId=key_id,
-                                          Status="Inactive",
-                                      )
-                                      iam.tag_user(
-                                          UserName=user["UserName"],
-                                          Tags=[{"Key": "TriggeredAt", "Value": ts}],
-                                      )
-                                      incident["username"] = user["UserName"]
-                                      log.info(f"Disabled key {key_id}")
-                      except Exception as e:
-                          log.error(f"Key disable error: {e}")
                   log.info(f"SPECTERKEYS INCIDENT: {json.dumps(incident)}")
               return {"statusCode": 200}
 
@@ -296,16 +349,16 @@ Resources:
       Principal: sns.amazonaws.com
       SourceArn: !Ref AlertTopic
 
-  # ── Secrets Manager — Key Registry ──────────────────────────────────────
-  KeyRegistry:
-    Type: AWS::SecretsManager::Secret
+  # Subscribe the Lambda to the topic via a standalone resource. Doing it here
+  # (rather than inline on AlertTopic) breaks the circular dependency between
+  # the topic and the function it invokes.
+  LambdaSNSSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: LambdaSNSPermission
     Properties:
-      Name: specterkeys/registry
-      Description: Master registry of all deployed SpecterKeys honey tokens
-      SecretString: '{"honey_keys": [], "total_deployed": 0, "total_triggered": 0}'
-      Tags:
-        - Key: SpecterKeys
-          Value: Infrastructure
+      TopicArn: !Ref AlertTopic
+      Protocol: lambda
+      Endpoint: !GetAtt AutoResponderLambda.Arn
 
   # ── CloudWatch Dashboard ─────────────────────────────────────────────────
   Dashboard:

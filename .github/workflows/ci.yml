@@ -19,12 +19,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install flake8 pytest pytest-cov bandit
+        run: pip install -r requirements-dev.txt
 
       - name: Lint (flake8)
-        run: flake8 src/ tests/ --max-line-length=110 --ignore=E501
+        run: flake8 src/ tests/
 
       - name: Security scan (bandit)
         run: bandit -r src/ -ll
@@ -38,14 +36,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            us-east-1
+          python-version: "3.12"
 
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      # cfn-lint validates the template offline — no AWS account or
+      # credentials required — and catches more issues (e.g. circular
+      # dependencies) than `aws cloudformation validate-template`.
       - name: Validate CloudFormation template
-        run: |
-          aws cloudformation validate-template \
-            --template-body file://infra/cloudformation.yaml
+        run: cfn-lint infra/cloudformation.yaml
