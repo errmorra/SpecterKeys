@@ -1,0 +1,15 @@
+[flake8]
+max-line-length = 110
+# The codebase deliberately uses column-aligned assignments and keyword
+# arguments for readability. Ignore the whitespace-alignment checks that this
+# style trips, plus the path-shim import in the test module.
+extend-ignore =
+    E501,
+    E402,
+    E221,
+    E222,
+    E226,
+    E231,
+    E241,
+    E251,
+    E272

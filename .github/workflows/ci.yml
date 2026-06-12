@@ -19,12 +19,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install flake8 pytest pytest-cov bandit
+        run: pip install -r requirements-dev.txt
 
       - name: Lint (flake8)
-        run: flake8 src/ tests/ --max-line-length=110 --ignore=E501
+        run: flake8 src/ tests/
 
       - name: Security scan (bandit)
         run: bandit -r src/ -ll
