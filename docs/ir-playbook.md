@@ -136,8 +136,8 @@ Contact in order:
 Always replace triggered honey tokens with fresh ones. The trap location should never go dark.
 
 ```bash
-# Revoke the triggered key and any other expired keys
-python src/specterkeys.py --revoke
+# Revoke the triggered key (use --all --yes to clear every key)
+python src/specterkeys.py --revoke --key-id AKIA... --yes
 
 # Deploy a fresh honey key
 python src/specterkeys.py --deploy

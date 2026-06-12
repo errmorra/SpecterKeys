@@ -2,7 +2,7 @@
 
 **Insider Threat Detection via AWS Honey Tokens**
 
-[![CI](https://github.com/your-org/specterkeys/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/specterkeys/actions)
+[![CI](https://github.com/specterkeys/specterkeys/actions/workflows/ci.yml/badge.svg)](https://github.com/specterkeys/specterkeys/actions)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![AWS](https://img.shields.io/badge/AWS-CloudTrail%20%7C%20CloudWatch%20%7C%20SNS-orange.svg)](https://aws.amazon.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -18,7 +18,9 @@
 
 SpecterKeys plants fake AWS Access Keys — called **honey tokens** — into tempting locations across your environment (shared S3 buckets, internal wikis, GitHub repos, `.env` files). The keys are cryptographically valid but backed by a `DenyAll` IAM policy, making them completely powerless.
 
-The moment any actor attempts to use one, CloudTrail captures the event, a CloudWatch alarm fires in under 60 seconds, your security team is paged, and a Lambda function automatically disables the key and opens an incident trail.
+The moment any actor attempts to use one, CloudTrail captures the event, a CloudWatch alarm fires, your security team is paged, and a Lambda function automatically disables the key and opens an incident trail.
+
+> **A note on detection latency:** the alarm itself evaluates on a 60-second period, but end-to-end latency is dominated by CloudTrail delivery to CloudWatch Logs, which is typically a few minutes (AWS does not guarantee sub-minute delivery). Plan your response around a *few-minute* detection window, not 60 seconds. If you need near-real-time detection, drive the alarm from an EventBridge rule on the CloudTrail event instead of a Logs metric filter.
 
 Since these keys have no legitimate use, **every single alert is a true positive.**
 
@@ -97,11 +99,12 @@ specterkeys/
 
 - Python 3.12+
 - AWS CLI configured with an IAM role that has permissions to:
-  - `iam:CreateUser`, `iam:CreateAccessKey`, `iam:PutUserPolicy`, `iam:DeleteUser`
-  - `cloudwatch:PutMetricAlarm`, `cloudwatch:DescribeAlarms`
-  - `logs:PutMetricFilter`, `logs:DescribeMetricFilters`
-  - `sns:CreateTopic`, `sns:Subscribe`
-  - `secretsmanager:CreateSecret`, `secretsmanager:GetSecretValue`
+  - `sts:GetCallerIdentity`
+  - `iam:CreateUser`, `iam:CreateAccessKey`, `iam:PutUserPolicy`, `iam:DeleteAccessKey`, `iam:DeleteUserPolicy`, `iam:DeleteUser`
+  - `cloudwatch:PutMetricAlarm`, `cloudwatch:DescribeAlarms`, `cloudwatch:DeleteAlarms`
+  - `logs:PutMetricFilter`, `logs:DescribeMetricFilters`, `logs:DeleteMetricFilter`
+  - `sns:CreateTopic`, `sns:Subscribe`, `sns:ListSubscriptionsByTopic`
+  - `secretsmanager:CreateSecret`, `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, `secretsmanager:ListSecrets`, `secretsmanager:DeleteSecret`
   - `cloudformation:*` (for stack deployment)
 - CloudTrail already enabled, streaming to a CloudWatch Log Group
 
@@ -157,6 +160,8 @@ Output:
   Key ID   : AKIA4EXAMPLEKEY0001
   IAM User : svc-legacy-backup-a1b2c3d4
   Alarm    : SpecterKeys-Triggered-AKIA4EXAMPLEKEY0001
+  Filter   : SpecterKeys-Filter-svc-legacy-backup-a1b2c3d4
+  Registry : specterkeys/AKIA4EXAMPLEKEY0001
   Files    : 4 planted in ./honey_drop/
 ```
 
@@ -190,18 +195,28 @@ git -C /path/to/internal-repo add . && git commit -m "Add legacy credential back
 # Deploy a new honey key + plant credential files
 python src/specterkeys.py --deploy
 
-# List all active honey keys from Secrets Manager registry
+# List all active honey keys from the Secrets Manager registry
 python src/specterkeys.py --list
+python src/specterkeys.py --list --json          # machine-readable (secrets redacted)
 
 # Check CloudWatch alarm states for all keys
-python src/specterkeys.py --status
+python src/specterkeys.py --status               # exits 2 if any key is in ALARM
+python src/specterkeys.py --status --json
 
-# Revoke all honey keys (IAM users, alarms, registry entries)
-python src/specterkeys.py --revoke
+# Revoke a single honey key (IAM user, alarm, metric filter, registry entry)
+python src/specterkeys.py --revoke --key-id AKIA... --yes
 
-# Use a custom CloudTrail log group
+# Revoke ALL honey keys (destructive — requires explicit confirmation)
+python src/specterkeys.py --revoke --all --yes
+
+# Target a specific region / named profile / custom CloudTrail log group
+python src/specterkeys.py --deploy --region eu-west-1 --profile security
 python src/specterkeys.py --deploy --log-group /custom/cloudtrail
 ```
+
+> `--revoke` will refuse to do anything without either `--key-id <id>` or
+> `--all`, and without `--yes` to confirm. This prevents an accidental
+> bulk teardown of every live trap.
 
 ---
 
@@ -217,7 +232,7 @@ python src/specterkeys.py --deploy --log-group /custom/cloudtrail
                                                │
                                      CW Metric Filter fires
                                                │
-                                     Alarm → ALARM in < 60s
+                              Alarm → ALARM (minutes)
                                                │
                                      SNS → Email + Lambda
                                                │
@@ -251,9 +266,9 @@ aws cloudtrail lookup-events \
 
 **6. Escalate** — legal, HR, executive leadership per your IR policy
 
-**7. Re-arm** — deploy a fresh honey key to the same location
+**7. Re-arm** — revoke the triggered key and deploy a fresh one to the same location
 ```bash
-python src/specterkeys.py --revoke
+python src/specterkeys.py --revoke --key-id AKIA... --yes
 python src/specterkeys.py --deploy
 ```
 
@@ -262,8 +277,9 @@ python src/specterkeys.py --deploy
 ## Running Tests
 
 ```bash
-pip install pytest pytest-cov
+pip install -r requirements-dev.txt
 pytest tests/ -v --cov=src
+flake8 src/ tests/          # lint (config in .flake8)
 ```
 
 ---
@@ -273,7 +289,7 @@ pytest tests/ -v --cov=src
 | Metric | Traditional DLP | SpecterKeys |
 |---|---|---|
 | False positive rate | High | **Zero** |
-| Detection latency | Minutes–hours | **< 60 seconds** |
+| Detection latency | Minutes–hours | **Minutes (CloudTrail-bound)** |
 | Evidence quality | Heuristic alerts | **CloudTrail proof of action** |
 | Coverage | Known patterns only | **Any key usage, any action** |
 | Insider vs external | Hard to distinguish | **Same detection path** |
